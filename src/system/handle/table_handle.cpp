@@ -35,7 +35,11 @@ TableHandle::TableHandle(DiskManager *disk_manager, BufferPoolManager *buffer_po
   schema_->SetTableId(table_id_);
   if (storage_model_ == PAX_MODEL) {
     // calculate offsets of fields
-    NJUDB_STUDENT_TODO(l1, f2);
+    size_t offset = 0;
+    for (size_t i = 0; i < schema_->GetFieldCount(); i++) {
+        field_offset_.push_back(offset);
+        offset += schema_->GetFieldAt(i).field_.field_size_ * tab_hdr_.rec_per_page_;
+    }
   }
 }
 
@@ -43,24 +47,106 @@ auto TableHandle::GetRecord(const RID &rid) -> RecordUptr
 {
   auto nullmap = std::make_unique<char[]>(tab_hdr_.nullmap_size_);
   auto data    = std::make_unique<char[]>(tab_hdr_.rec_size_);
-  NJUDB_STUDENT_TODO(l1, t3);
+  
+  PageHandleUptr page_handle = FetchPageHandle(rid.PageID());
+  
+  if (!BitMap::GetBit(page_handle->GetBitmap(), rid.SlotID())) {
+    buffer_pool_manager_->UnpinPage(table_id_, rid.PageID(), false);
+    NJUDB_THROW(NJUDB_RECORD_MISS, "Record not found");
+  }
+  
+  page_handle->ReadSlot(rid.SlotID(), nullmap.get(), data.get());
+  
+  buffer_pool_manager_->UnpinPage(table_id_, rid.PageID(), false);
+  
+  return std::make_unique<Record>(schema_.get(), nullmap.get(), data.get(), rid);
 }
 
-auto TableHandle::GetChunk(page_id_t pid, const RecordSchema *chunk_schema) -> ChunkUptr { NJUDB_STUDENT_TODO(l1, f2); }
+auto TableHandle::GetChunk(page_id_t pid, const RecordSchema *chunk_schema) -> ChunkUptr { 
+  PageHandleUptr page_handle = FetchPageHandle(pid);
+  auto chunk = page_handle->ReadChunk(chunk_schema);
+  buffer_pool_manager_->UnpinPage(table_id_, pid, false);
+  return chunk;
+}
 
-auto TableHandle::InsertRecord(const Record &record) -> RID { NJUDB_STUDENT_TODO(l1, t3); }
+auto TableHandle::InsertRecord(const Record &record) -> RID { 
+  PageHandleUptr page_handle = CreatePageHandle();
+  
+  size_t slot_id = BitMap::FindFirst(page_handle->GetBitmap(), tab_hdr_.rec_per_page_, 0, false);
+  
+  page_handle->WriteSlot(slot_id, record.GetNullMap(), record.GetData(), false);
+  
+  BitMap::SetBit(page_handle->GetBitmap(), slot_id, true);
+  page_handle->GetPage()->SetRecordNum(page_handle->GetPage()->GetRecordNum() + 1);
+  
+  if (page_handle->GetPage()->GetRecordNum() == tab_hdr_.rec_per_page_) {
+    tab_hdr_.first_free_page_ = page_handle->GetPage()->GetNextFreePageId();
+    page_handle->GetPage()->SetNextFreePageId(INVALID_PAGE_ID);
+  }
+  
+  RID rid(page_handle->GetPage()->GetPageId(), static_cast<slot_id_t>(slot_id));
+  buffer_pool_manager_->UnpinPage(table_id_, page_handle->GetPage()->GetPageId(), true);
+  
+  return rid;
+}
 
 void TableHandle::InsertRecord(const RID &rid, const Record &record)
 {
   if (rid.PageID() == INVALID_PAGE_ID) {
     NJUDB_THROW(NJUDB_PAGE_MISS, fmt::format("Page: {}", rid.PageID()));
   }
-  NJUDB_STUDENT_TODO(l1, t3);
+  
+  PageHandleUptr page_handle = FetchPageHandle(rid.PageID());
+  
+  if (BitMap::GetBit(page_handle->GetBitmap(), rid.SlotID())) {
+     buffer_pool_manager_->UnpinPage(table_id_, rid.PageID(), false);
+     NJUDB_THROW(NJUDB_RECORD_EXISTS, "Record exists");
+  }
+  
+  page_handle->WriteSlot(rid.SlotID(), record.GetNullMap(), record.GetData(), false);
+  
+  BitMap::SetBit(page_handle->GetBitmap(), rid.SlotID(), true);
+  page_handle->GetPage()->SetRecordNum(page_handle->GetPage()->GetRecordNum() + 1);
+  
+  if (page_handle->GetPage()->GetRecordNum() == tab_hdr_.rec_per_page_ && tab_hdr_.first_free_page_ == rid.PageID()) {
+      tab_hdr_.first_free_page_ = page_handle->GetPage()->GetNextFreePageId();
+      page_handle->GetPage()->SetNextFreePageId(INVALID_PAGE_ID);
+  }
+  
+  buffer_pool_manager_->UnpinPage(table_id_, rid.PageID(), true);
 }
 
-void TableHandle::DeleteRecord(const RID &rid) { NJUDB_STUDENT_TODO(l1, t3); }
+void TableHandle::DeleteRecord(const RID &rid) { 
+  PageHandleUptr page_handle = FetchPageHandle(rid.PageID());
+  
+  if (!BitMap::GetBit(page_handle->GetBitmap(), rid.SlotID())) {
+    buffer_pool_manager_->UnpinPage(table_id_, rid.PageID(), false);
+    NJUDB_THROW(NJUDB_RECORD_MISS, "Record missing");
+  }
+  
+  BitMap::SetBit(page_handle->GetBitmap(), rid.SlotID(), false);
+  page_handle->GetPage()->SetRecordNum(page_handle->GetPage()->GetRecordNum() - 1);
+  
+  if (page_handle->GetPage()->GetRecordNum() == tab_hdr_.rec_per_page_ - 1) {
+      page_handle->GetPage()->SetNextFreePageId(tab_hdr_.first_free_page_);
+      tab_hdr_.first_free_page_ = rid.PageID();
+  }
+  
+  buffer_pool_manager_->UnpinPage(table_id_, rid.PageID(), true);
+}
 
-void TableHandle::UpdateRecord(const RID &rid, const Record &record) { NJUDB_STUDENT_TODO(l1, t3); }
+void TableHandle::UpdateRecord(const RID &rid, const Record &record) { 
+  PageHandleUptr page_handle = FetchPageHandle(rid.PageID());
+  
+  if (!BitMap::GetBit(page_handle->GetBitmap(), rid.SlotID())) {
+    buffer_pool_manager_->UnpinPage(table_id_, rid.PageID(), false);
+    NJUDB_THROW(NJUDB_RECORD_MISS, "Record missing");
+  }
+  
+  page_handle->WriteSlot(rid.SlotID(), record.GetNullMap(), record.GetData(), true);
+  
+  buffer_pool_manager_->UnpinPage(table_id_, rid.PageID(), true);
+}
 
 auto TableHandle::FetchPageHandle(page_id_t page_id) -> PageHandleUptr
 {

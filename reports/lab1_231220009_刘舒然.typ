@@ -168,3 +168,42 @@
 #test_result("BufferPoolManagerTest.SimpleTest", passed: true)
 #test_result("BufferPoolManagerTest.MultiThread", passed: true)
 #image("/assets/image-2.png")
+
+= t3. Table Handle
+
+== 实现思路
+
+- GetRecord:
+  1. 通过 rid 中的 PageID 调用 FetchPageHandle 获取页面句柄
+  2. 利用页面 Bitmap 检查该 SlotID 是否有效。若无效，抛出 NJUDB_RECORD_MISS
+  3. 若有效，调用 PageHandle::ReadSlot 将数据读取到临时的 data 和 nullmap 缓冲区中
+  4. 最后，调用 UnpinPage 释放页面，构建并返回 Record 对象
+
+- InsertRecord:
+  1. 调用 CreatePageHandle 获取一个有空闲槽位的页面句柄
+  2. 利用 BitMap::FindFirst 在该页中找到第一个空闲的 slot_id
+  3. 调用 PageHandle::WriteSlot 将记录数据写入该槽位
+  4. 更新 Bitmap 和 RecordNum
+  5. 若插入后页面变满，需要更新文件头的`first_free_page_` 指针，将其指向该页原本记录的下一空闲页，并将该页移出空闲链表
+  6. 调用 UnpinPage 释放页面
+
+- InsertRecord:
+  1. 指定位置插入。先获取页面并检查 Bitmap，若目标位置已有数据则抛出异常
+  2. 写入数据，更新 Bitmap 和计数
+  3. 同样检查页面是否因此变满，若是，则维护空闲链表
+
+- DeleteRecord:
+  1. 获取页面，检查 Bitmap 确认记录存在
+  2. 更新 Bitmap 和减少记录计数
+  3. 若删除前页面是满的，说明该页现在有空位了，将其头插法加入到文件的空闲链表中
+  4. 调用 UnpinPage
+
+- UpdateRecord:
+  1. 获取页面，确认记录存在
+  2. 调用 PageHandle::WriteSlot 覆盖旧数据（
+  3. 调用 UnpinPage
+
+== 测试结果
+#test_result("TableHandle.Simple", passed: true)
+#test_result("TableHandle.MultiThread", passed: true)
+#image("/assets/image-3.png")
