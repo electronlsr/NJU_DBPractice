@@ -207,3 +207,21 @@
 #test_result("TableHandle.Simple", passed: true)
 #test_result("TableHandle.MultiThread", passed: true)
 #image("/assets/image-3.png")
+
+= f1. LRU K Replacer
+
+== 实现思路
+
+- Pin: 记录一次访问，获取当前全局时间戳    `cur_ts_`，调用 AddHistory 更新节点的访问历史，将页面标记为不可淘汰
+
+- Victim: 遍历所有 is_evictable 的节点
+  - 维护 max_dist 和 earliest_ts
+  - 若当前节点 $D_k = +infinity$:
+    - 如果之前的 max_dist 不是 $+infinity$，说明找到了更优先的淘汰类别，直接更新 $"max_dist" = +infinity$ 并记录当前节点
+    - 如果之前的 max_dist 已经是 $+infinity$，则比较两个节点的最早访问时间，保留时间更早的那个
+  - 若当前节点 $D_k < +infinity$: 只有当之前的 max_dist 也不是 $+infinity$ 时才进行比较。若当前 $D_k > "max_dist"$，则更新候选
+
+== 测试结果
+#test_result("ReplacerTest.LRUK", passed: true)
+#image("/assets/image-4.png")
+
