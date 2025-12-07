@@ -43,21 +43,190 @@ BufferPoolManager::BufferPoolManager(DiskManager *disk_manager, njudb::LogManage
   }
 }
 
-auto BufferPoolManager::FetchPage(file_id_t fid, page_id_t pid) -> Page * { NJUDB_STUDENT_TODO(l1, t2); }
+auto BufferPoolManager::FetchPage(file_id_t fid, page_id_t pid) -> Page * {
+  std::scoped_lock lock(latch_);
+  auto iter = page_frame_lookup_.find({fid, pid});
+  
+  if (iter != page_frame_lookup_.end()) {
+    frame_id_t frame_id = iter->second;
+    Frame *frame = &frames_[frame_id];
+    
+    frame->Pin();
+    replacer_->Pin(frame_id);
+    return frame->GetPage();
+  } else {
+    try {
+      frame_id_t frame_id = GetAvailableFrame();
+      UpdateFrame(frame_id, fid, pid);
+      return frames_[frame_id].GetPage();
+    } catch (const NJUDBException_ &e) {
+      return nullptr;
+    }
+  }
+}
 
-auto BufferPoolManager::UnpinPage(file_id_t fid, page_id_t pid, bool is_dirty) -> bool { NJUDB_STUDENT_TODO(l1, t2); }
+auto BufferPoolManager::UnpinPage(file_id_t fid, page_id_t pid, bool is_dirty) -> bool {
+  std::scoped_lock lock(latch_);
+  
+  auto iter = page_frame_lookup_.find({fid, pid});
+  if (iter == page_frame_lookup_.end()) {
+    return false;
+  }
+  
+  frame_id_t frame_id = iter->second;
+  Frame *frame = &frames_[frame_id];
+  
+  if (frame->GetPinCount() <= 0) {
+    return false;
+  }
+  
+  if (is_dirty) {
+    frame->SetDirty(true);
+  }
+  
+  frame->Unpin();
+  if (frame->GetPinCount() == 0) {
+    replacer_->Unpin(frame_id);
+  }
+  
+  return true;
+}
 
-auto BufferPoolManager::DeletePage(file_id_t fid, page_id_t pid) -> bool { NJUDB_STUDENT_TODO(l1, t2); }
+auto BufferPoolManager::DeletePage(file_id_t fid, page_id_t pid) -> bool {
+  std::scoped_lock lock(latch_);
+  
+  auto iter = page_frame_lookup_.find({fid, pid});
+  if (iter == page_frame_lookup_.end()) {
+    return true;
+  }
+  
+  frame_id_t frame_id = iter->second;
+  Frame *frame = &frames_[frame_id];
+  
+  if (frame->GetPinCount() > 0) {
+    return false;
+  }
+  
+  if (frame->IsDirty()) {
+      disk_manager_->WritePage(fid, pid, frame->GetPage()->GetData());
+  }
+  
+  page_frame_lookup_.erase(iter);
+  
+  replacer_->Pin(frame_id);
 
-auto BufferPoolManager::DeleteAllPages(file_id_t fid) -> bool { NJUDB_STUDENT_TODO(l1, t2); }
+  frame->Reset();
+  free_list_.push_back(frame_id);
+  
+  return true;
+}
 
-auto BufferPoolManager::FlushPage(file_id_t fid, page_id_t pid) -> bool { NJUDB_STUDENT_TODO(l1, t2); }
+auto BufferPoolManager::DeleteAllPages(file_id_t fid) -> bool {
+  std::scoped_lock lock(latch_);
+  
+  for (auto it = page_frame_lookup_.begin(); it != page_frame_lookup_.end(); ) {
+    if (it->first.fid == fid) {
+      frame_id_t frame_id = it->second;
+      Frame *frame = &frames_[frame_id];
+      
+      if (frame->GetPinCount() > 0) {
+          return false;
+      }
+      
+      if (frame->IsDirty()) {
+          disk_manager_->WritePage(fid, it->first.pid, frame->GetPage()->GetData());
+      }
+      
+      replacer_->Pin(frame_id);
+      
+      frame->Reset();
+      free_list_.push_back(frame_id);
+      
+      it = page_frame_lookup_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return true;
+}
 
-auto BufferPoolManager::FlushAllPages(file_id_t fid) -> bool { NJUDB_STUDENT_TODO(l1, t2); }
+auto BufferPoolManager::FlushPage(file_id_t fid, page_id_t pid) -> bool {
+  std::scoped_lock lock(latch_);
+  auto iter = page_frame_lookup_.find({fid, pid});
+  if (iter == page_frame_lookup_.end()) {
+    return false;
+  }
+  
+  frame_id_t frame_id = iter->second;
+  Frame *frame = &frames_[frame_id];
+  
+  if (frame->IsDirty()) {
+    disk_manager_->WritePage(fid, pid, frame->GetPage()->GetData());
+    frame->SetDirty(false);
+  }
+  
+  return true;
+}
 
-auto BufferPoolManager::GetAvailableFrame() -> frame_id_t { NJUDB_STUDENT_TODO(l1, t2); }
+auto BufferPoolManager::FlushAllPages(file_id_t fid) -> bool {
+  std::scoped_lock lock(latch_);
+  for (const auto& pair : page_frame_lookup_) {
+    if (pair.first.fid == fid) {
+      frame_id_t frame_id = pair.second;
+      Frame *frame = &frames_[frame_id];
+      if (frame->IsDirty()) {
+        disk_manager_->WritePage(fid, pair.first.pid, frame->GetPage()->GetData());
+        frame->SetDirty(false);
+      }
+    }
+  }
+  return true;
+}
 
-void BufferPoolManager::UpdateFrame(frame_id_t frame_id, file_id_t fid, page_id_t pid) { NJUDB_STUDENT_TODO(l1, t2); }
+auto BufferPoolManager::GetAvailableFrame() -> frame_id_t {
+  if (!free_list_.empty()) {
+    frame_id_t frame_id = free_list_.front();
+    free_list_.pop_front();
+    return frame_id;
+  }
+  
+  frame_id_t victim_id;
+  if (replacer_->Victim(&victim_id)) {
+    Frame *victim_frame = &frames_[victim_id];
+    
+    if (victim_frame->IsDirty()) {
+      disk_manager_->WritePage(victim_frame->GetPage()->GetFileId(), 
+                               victim_frame->GetPage()->GetPageId(), 
+                               victim_frame->GetPage()->GetData());
+      victim_frame->SetDirty(false);
+    }
+    
+    page_frame_lookup_.erase({victim_frame->GetPage()->GetFileId(), victim_frame->GetPage()->GetPageId()});
+    victim_frame->Reset();
+    
+    return victim_id;
+  }
+  
+  throw NJUDBException_(NJUDB_NO_FREE_FRAME, "BufferPoolManager", "GetAvailableFrame", "No free frame available in buffer pool");
+}
+
+void BufferPoolManager::UpdateFrame(frame_id_t frame_id, file_id_t fid, page_id_t pid) {
+  Frame *frame = &frames_[frame_id];
+  
+  if (frame->IsDirty()) {
+     disk_manager_->WritePage(frame->GetPage()->GetFileId(), frame->GetPage()->GetPageId(), frame->GetPage()->GetData());
+  }
+
+  frame->Reset();
+  frame->GetPage()->SetFilePageId(fid, pid);
+  
+  disk_manager_->ReadPage(fid, pid, frame->GetPage()->GetData());
+  
+  frame->Pin();
+  replacer_->Pin(frame_id);
+  
+  page_frame_lookup_[{fid, pid}] = frame_id;
+}
 
 auto BufferPoolManager::GetFrame(file_id_t fid, page_id_t pid) -> Frame *
 {

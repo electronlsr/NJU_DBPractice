@@ -126,9 +126,9 @@
 
 == 实现思路
 
-- `Pin`：如果页面已在链表中，将其标记为 `is_evictable = false`，并移动到链表尾部。如果不在链表中，则新建节点加入尾部
-- `Unpin`：将页面的状态更新为     `is_evictable = true`。如果页面意外不在链表中，则作为新页面加入 MRU。
-- `Victim`：找到第一个 `is_evictable == true` 的页面。将其从链表和哈希表中彻底移除。
+- `Pin`: 如果页面已在链表中，将其标记为 `is_evictable = false`，并移动到链表尾部。如果不在链表中，则新建节点加入尾部
+- `Unpin`: 将页面的状态更新为     `is_evictable = true`。如果页面意外不在链表中，则作为新页面加入 MRU。
+- `Victim`: 找到第一个 `is_evictable == true` 的页面。将其从链表和哈希表中彻底移除。
 
 == 测试结果
 #test_result("ReplacerTest.LRU", passed: true)
@@ -139,25 +139,32 @@
 = t2. Buffer Pool Manager
 
 == 实现思路
-// 解释 FetchPage, UnpinPage, FlushPage 等核心函数的逻辑。
-// 重点描述 Page ID 和 Frame ID 的映射关系维护，以及 Free List 的管理。
 
-Buffer Pool Manager 是内存管理的核心。我维护了 `page_table_` 来记录磁盘页号 (`page_id`) 到内存帧号 (`frame_id`) 的映射。
+- FetchPage:
+  - 命中: 如果页面已在 Buffer Pool 中，直接返回对应的 Frame。必须增加引用计数，并调用 `replacer_->Pin()` 通知替换算法该页面正在被使用
+  - 未命中:
+    1. 调用 `GetAvailableFrame()` 获取一个可用帧
+    2. 调用 `UpdateFrame()` 将目标磁盘页加载到该帧中
+    3. 返回该页
 
-- *FetchPage*: 当上层请求一个页面时，首先在 `page_table_` 查找。如果存在，直接 Pin 并返回；如果不存在，则调用 `FindFrame` 获取空闲帧（可能触发 LRU Evict），并从磁盘读取数据。
-- *DeletePage*: 在删除页面时，需要注意...
+- GetAvailableFrame: 优先获取空闲帧。若无空闲帧，调用 `replacer_->Victim()` 选择牺牲帧。如果牺牲帧是脏的，必须先调用 `disk_manager_->WritePage()` 将其写回磁盘。最后还要完成清理工作
 
-== 关键代码逻辑
-// 如果有需要展示的代码片段，可以使用代码块
-```cpp
-// 示例：获取空闲帧的逻辑片段
-if (!free_list_.empty()) {
-    frame_id = free_list_.front();
-    free_list_.pop_front();
-} else {
-    if (!replacer_->Victim(&frame_id)) {
-        return nullptr; // 无可用帧
-    }
-    // 处理脏页写回逻辑...
-}
-```
+- UpdateFrame:
+  1. *先*调用 frame->Reset() 清除旧状态
+  2. 设置新的 fid 和 pid。
+  3. 从磁盘读取数据到内存。
+  4. 更新映射，Pin 该帧。
+
+- UnpinPage:
+  - 减少 Frame 的引用计数。
+  - 当参数 is_dirty 为 true 时，将 Frame 标记为脏
+  - 当引用计数降为 0 时，调用 `replacer_->Unpin()`，通知替换算法该帧现在可以被淘汰
+
+- FlushPage/DeletePage:
+    - FlushPage: 强制将脏页写回磁盘，并清除脏标记
+    - DeletePage: 如果页面当前被 Pin 住，则不能删除。删除时需确保脏数据已写回，然后将帧放回 `free_list_`，并从 `page_frame_lookup_` 移除
+
+== 测试结果
+#test_result("BufferPoolManagerTest.SimpleTest", passed: true)
+#test_result("BufferPoolManagerTest.MultiThread", passed: true)
+#image("/assets/image-2.png")
