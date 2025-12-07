@@ -225,3 +225,25 @@
 #test_result("ReplacerTest.LRUK", passed: true)
 #image("/assets/image-4.png")
 
+= f2. PAX Page Handle
+
+== 实现思路
+
+- WriteSlot:
+  1. 计算第 slot_id 个记录的 Nullmap 目标地址，memcpy 写入
+  2. 遍历 Schema 中的每一列，计算该列 Block 的基地址。之后，在 Block 中定位到第 slot_id 个元素的偏移，从输入的行存 data 缓冲区中，根据 Schema 的行存偏移读取数据，写入到 PAX 的目标位置
+
+- ReadSlot:
+  1. 从 PAX Nullmap 区读取到输出缓冲区
+  2. 遍历每一列，从 PAX 的列 Block 中读取第 slot_id 个元素，写入到输出的行存 data 缓冲区的对应位置
+
+- ReadChunk: 读取几列的所有有效数据
+  1. 遍历 chunk_schema 中的每一列
+  2. 找到该列的 orig_idx，从而获取其在 PAX 页面中的 offsets\_[orig_idx]
+  3. 遍历页面中的所有 Slot
+  4. 检查页面的全局 Bitmap，若 slot_id 处无记录，则跳过。检查该记录的 Nullmap 中对应的位。若为空，创建 NullValue；否则，从列 Block 中读取数据并创建具体类型的 Value
+  5. 将所有有效 Value 收集，创建一个 ArrayValue，最终组合成 Chunk 返回
+
+== 测试结果
+#test_result("TableHandle.PAX_MultiThread", passed: true)
+#image("/assets/image-5.png", width: 73%)

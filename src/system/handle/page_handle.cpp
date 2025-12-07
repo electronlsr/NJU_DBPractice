@@ -79,17 +79,84 @@ PAXPageHandle::~PAXPageHandle() = default;
 // | field_m_1, field_m_2, ... , field_m_n |
 void PAXPageHandle::WriteSlot(size_t slot_id, const char *null_map, const char *data, bool update)
 {
-  NJUDB_STUDENT_TODO(l1, f2);
+  NJUDB_ASSERT(slot_id < tab_hdr_->rec_per_page_, "slot_id out of range");
+  NJUDB_ASSERT(BitMap::GetBit(bitmap_, slot_id) == update, fmt::format("update: {}", update));
+  
+  char* nullmap_base = slots_mem_;
+  memcpy(nullmap_base + slot_id * tab_hdr_->nullmap_size_, null_map, tab_hdr_->nullmap_size_);
+  char* field_base = slots_mem_ + (tab_hdr_->nullmap_size_ * tab_hdr_->rec_per_page_);
+  
+  for (size_t i = 0; i < schema_->GetFieldCount(); ++i) {
+    const auto& field = schema_->GetFieldAt(i);
+    size_t col_offset = offsets_[i]; // Offset of this column block
+    size_t field_size = field.field_.field_size_;
+    char* target_addr = field_base + col_offset + (slot_id * field_size);
+    size_t src_offset = schema_->GetFieldOffset(i);
+    
+    memcpy(target_addr, data + src_offset, field_size);
+  }
 }
 
-void PAXPageHandle::ReadSlot(size_t slot_id, char *null_map, char *data) { NJUDB_STUDENT_TODO(l1, f2); }
+void PAXPageHandle::ReadSlot(size_t slot_id, char *null_map, char *data) {
+  NJUDB_ASSERT(slot_id < tab_hdr_->rec_per_page_, "slot_id out of range");
+  NJUDB_ASSERT(BitMap::GetBit(bitmap_, slot_id) == true, "slot is empty");
+  
+  char* nullmap_base = slots_mem_;
+  memcpy(null_map, nullmap_base + slot_id * tab_hdr_->nullmap_size_, tab_hdr_->nullmap_size_);
+  
+  char* field_base = slots_mem_ + (tab_hdr_->nullmap_size_ * tab_hdr_->rec_per_page_);
+  
+  for (size_t i = 0; i < schema_->GetFieldCount(); ++i) {
+    const auto& field = schema_->GetFieldAt(i);
+    size_t col_offset = offsets_[i];
+    size_t field_size = field.field_.field_size_;
+    
+    char* src_addr = field_base + col_offset + (slot_id * field_size);
+    size_t dst_offset = schema_->GetFieldOffset(i);
+    
+    memcpy(data + dst_offset, src_addr, field_size);
+  }
+}
 
 auto PAXPageHandle::ReadChunk(const RecordSchema *chunk_schema) -> ChunkUptr
 {
   std::vector<ArrayValueSptr> col_arrs;
   col_arrs.reserve(chunk_schema->GetFieldCount());
   // read data each field and construct ArrayValue
-  NJUDB_STUDENT_TODO(l1, f2);
+  char* field_base = slots_mem_ + (tab_hdr_->nullmap_size_ * tab_hdr_->rec_per_page_);
+  char* nullmap_base = slots_mem_;
+  
+  for (size_t i = 0; i < chunk_schema->GetFieldCount(); ++i) {
+    const auto& target_field = chunk_schema->GetFieldAt(i);
+    size_t orig_idx = schema_->GetRTFieldIndex(target_field);
+    NJUDB_ASSERT(orig_idx != schema_->GetFieldCount(), "Field not found in schema");
+    
+    size_t col_offset = offsets_[orig_idx];
+    size_t field_size = target_field.field_.field_size_;
+    char* col_data_start = field_base + col_offset;
+    
+    std::vector<ValueSptr> values;
+    values.reserve(tab_hdr_->rec_per_page_); // upper bound
+    
+    for (size_t slot_id = 0; slot_id < tab_hdr_->rec_per_page_; ++slot_id) {
+       if (!BitMap::GetBit(bitmap_, slot_id)) {
+         continue; 
+       }
+       
+       char* slot_nullmap = nullmap_base + slot_id * tab_hdr_->nullmap_size_;
+       bool is_null = BitMap::GetBit(slot_nullmap, orig_idx);
+       
+       if (is_null) {
+         values.push_back(ValueFactory::CreateNullValue(target_field.field_.field_type_));
+       } else {
+         char* val_ptr = col_data_start + (slot_id * field_size);
+         values.push_back(ValueFactory::CreateValue(target_field.field_.field_type_, val_ptr, field_size));
+       }
+    }
+    
+    col_arrs.push_back(std::make_shared<ArrayValue>(values));
+  }
+  
   return std::make_unique<Chunk>(chunk_schema, std::move(col_arrs));
 }
 }  // namespace njudb
