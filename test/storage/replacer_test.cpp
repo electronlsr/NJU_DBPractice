@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <vector>
 #include <unordered_set>
+#include <algorithm>
 
 #include "gtest/gtest.h"
 
