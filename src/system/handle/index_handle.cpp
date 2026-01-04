@@ -45,29 +45,32 @@ IndexHandle::IndexHandle(DiskManager *disk_manager, BufferPoolManager *buffer_po
 
 void IndexHandle::InsertRecord(const Record &rec)
 {
-  NJUDB_STUDENT_TODO(l4, t2);
+  Record key(&GetKeySchema(), rec);
+  index_->Insert(key, rec.GetRID());
 }
 
 void IndexHandle::DeleteRecord(const Record &rec)
 {
-  NJUDB_STUDENT_TODO(l4, t2);
+  Record key(&GetKeySchema(), rec);
+  index_->Delete(key);
 }
 
 void IndexHandle::UpdateRecord(const Record &old_rec, const Record &new_rec)
 {
-  NJUDB_STUDENT_TODO(l4, t2);
+  DeleteRecord(old_rec);
+  InsertRecord(new_rec);
 }
 
 auto IndexHandle::SearchRange(const Record &low_key, const Record &high_key) -> std::vector<RID>
 {
-  NJUDB_STUDENT_TODO(l4, t2);
-  return {};
+  return index_->SearchRange(low_key, high_key);
 }
 
 auto IndexHandle::CheckRecordExists(const Record &record) -> bool
 {
-  NJUDB_STUDENT_TODO(l4, t2);
-  return false;
+  Record key(&GetKeySchema(), record);
+  auto results = index_->Search(key);
+  return !results.empty();
 }
 
 auto IndexHandle::PrintIndexStats() -> std::string

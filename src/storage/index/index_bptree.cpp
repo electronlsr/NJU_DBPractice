@@ -27,8 +27,6 @@
 #include <vector>
 #include <string>
 
-#define TEST_BPTREE
-
 namespace njudb {
 
 static void DebugPrintLeaf(const BPTreeLeafPage *leaf_node, const RecordSchema *key_schema)
